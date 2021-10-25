@@ -2,19 +2,19 @@
 
 int main()
 {
-  constexpr int LENGTH = 10;
-  constexpr int VULKAN_DEVICE_ID = 0;
+    constexpr int LENGTH = 256*256;
+    constexpr int VULKAN_DEVICE_ID = 1;
+    
+    std::shared_ptr<ICompute> app = std::make_unique<SimpleCompute>(LENGTH);
+    if(app == nullptr)
+    {
+        std::cout << "Can't create render of specified type" << std::endl;
+        return 1;
+    }
 
-  std::shared_ptr<ICompute> app = std::make_unique<SimpleCompute>(LENGTH);
-  if(app == nullptr)
-  {
-    std::cout << "Can't create render of specified type" << std::endl;
-    return 1;
-  }
+    app->InitVulkan(nullptr, 0, VULKAN_DEVICE_ID);
 
-  app->InitVulkan(nullptr, 0, VULKAN_DEVICE_ID);
+    app->Execute();
 
-  app->Execute();
-
-  return 0;
+    return 0;
 }
