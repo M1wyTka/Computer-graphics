@@ -70,34 +70,58 @@ void SimpleCompute::CreateDevice(uint32_t a_deviceId)
 }
 
 
-void SimpleCompute::SetupSimplePipeline()
+void SimpleCompute::SetupSimplePipeline() // Not Pipeline setup but buffer setups
 {
   std::vector<std::pair<VkDescriptorType, uint32_t> > dtypes = {
-      {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             3}
+      {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             6}
   };
 
-  m_A = vk_utils::createBuffer(m_device, sizeof(float) * m_length, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-  m_B = vk_utils::createBuffer(m_device, sizeof(float) * m_length, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-  m_sum = vk_utils::createBuffer(m_device, sizeof(float) * m_length, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-  vk_utils::allocateAndBindWithPadding(m_device, m_physicalDevice, {m_A, m_B, m_sum}, 0);
+  // Создание и аллокация буферов
+  m_A         = vk_utils::createBuffer(m_device, sizeof(float) * m_length, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | 
+                                                                           VK_BUFFER_USAGE_TRANSFER_DST_BIT | 
+                                                                           VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+  m_groupSums = vk_utils::createBuffer(m_device, sizeof(float) * groupAmount, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                                                              VK_BUFFER_USAGE_TRANSFER_DST_BIT | 
+                                                                              VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+  m_finalSums = vk_utils::createBuffer(m_device, sizeof(float) * m_length, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                                                           VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                                                                           VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+  vk_utils::allocateAndBindWithPadding(m_device, m_physicalDevice, {m_A, m_groupSums, m_finalSums}, 0);
 
-  m_pBindings = std::make_shared<vk_utils::DescriptorMaker>(m_device, dtypes, 1);
+  m_pBindings = std::make_shared<vk_utils::DescriptorMaker>(m_device, dtypes, 3);
 
+  // Создание descriptor set для передачи буферов в шейдер
   m_pBindings->BindBegin(VK_SHADER_STAGE_COMPUTE_BIT);
   m_pBindings->BindBuffer(0, m_A);
-  m_pBindings->BindBuffer(1, m_B);
-  m_pBindings->BindBuffer(2, m_sum);
+  m_pBindings->BindBuffer(1, m_groupSums);
+  m_pBindings->BindBuffer(2, m_finalSums);
   m_pBindings->BindEnd(&m_sumDS, &m_sumDSLayout);
 
+  // Создание descriptor set для передачи буферов в шейдер
+  m_pBindings->BindBegin(VK_SHADER_STAGE_COMPUTE_BIT);
+  m_pBindings->BindBuffer(0, m_groupSums);
+  m_pBindings->BindBuffer(1, m_groupSums);
+  m_pBindings->BindBuffer(2, m_groupSums);
+  m_pBindings->BindEnd(&m_repeatSumDS, &m_repeatSumDSLayout);
+
+  // Создание descriptor set для передачи буферов в шейдер
+  m_pBindings->BindBegin(VK_SHADER_STAGE_COMPUTE_BIT);
+  m_pBindings->BindBuffer(0, m_groupSums);
+  m_pBindings->BindBuffer(1, m_finalSums);
+  m_pBindings->BindEnd(&m_addNeighbourDS, &m_addNeighbourDSLayout);
+
+  // Заполнение буферов
   std::vector<float> values(m_length);
   for (uint32_t i = 0; i < values.size(); ++i) {
-    values[i] = i;
+    values[i] = 1;
   }
   m_pCopyHelper->UpdateBuffer(m_A, 0, values.data(), sizeof(float) * values.size());
+
   for (uint32_t i = 0; i < values.size(); ++i) {
-    values[i] = i * i;
+    values[i] = 0;
   }
-  m_pCopyHelper->UpdateBuffer(m_B, 0, values.data(), sizeof(float) * values.size());
+  m_pCopyHelper->UpdateBuffer(m_groupSums, 0, values.data(), sizeof(float) * groupAmount);
+  m_pCopyHelper->UpdateBuffer(m_finalSums, 0, values.data(), sizeof(float) * values.size());
 }
 
 void SimpleCompute::BuildCommandBufferSimple(VkCommandBuffer a_cmdBuff, VkPipeline a_pipeline)
@@ -108,14 +132,54 @@ void SimpleCompute::BuildCommandBufferSimple(VkCommandBuffer a_cmdBuff, VkPipeli
   beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
   beginInfo.flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
 
+  struct pushConst
+  {
+    uint totalLength;
+    uint depth;
+  };
+
+  // Заполняем буфер команд
   VK_CHECK_RESULT(vkBeginCommandBuffer(a_cmdBuff, &beginInfo));
 
-  vkCmdBindPipeline      (a_cmdBuff, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipeline);
-  vkCmdBindDescriptorSets(a_cmdBuff, VK_PIPELINE_BIND_POINT_COMPUTE, m_layout, 0, 1, &m_sumDS, 0, NULL);
+  pushConst vals = pushConst{m_length, 0};
+  vkCmdBindPipeline      (a_cmdBuff, VK_PIPELINE_BIND_POINT_COMPUTE, m_sumPipeline);
+  vkCmdBindDescriptorSets(a_cmdBuff, VK_PIPELINE_BIND_POINT_COMPUTE, m_sumPipelineLayout, 0, 1, &m_sumDS, 0, NULL);
+  vkCmdPushConstants(a_cmdBuff, m_sumPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(vals), &vals);
 
-  vkCmdPushConstants(a_cmdBuff, m_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(m_length), &m_length);
 
+  vkCmdDispatch(a_cmdBuff, groupAmount, 1, 1);
+
+  
+  VkBufferMemoryBarrier barrier = {};
+  barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+  barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+  barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+  barrier.buffer = m_groupSums;
+  barrier.offset = 0;
+  barrier.size = sizeof(float) * groupAmount;
+
+  vkCmdPipelineBarrier(a_cmdBuff,
+  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, {}, 0, nullptr, 1, &barrier, 0, nullptr);
+
+  pushConst vals2 = pushConst{groupAmount, 1};
+  vkCmdBindDescriptorSets(a_cmdBuff, VK_PIPELINE_BIND_POINT_COMPUTE, m_sumPipelineLayout, 0, 1, &m_repeatSumDS, 0, NULL);
+  vkCmdPushConstants(a_cmdBuff, m_sumPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(vals2), &vals2);
+  vkCmdPipelineBarrier(a_cmdBuff, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       {}, 0, nullptr, 1, &barrier, 0, nullptr);
+  
+  vkCmdPipelineBarrier(a_cmdBuff,
+  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, {}, 0, nullptr, 1, &barrier, 0, nullptr);
   vkCmdDispatch(a_cmdBuff, 1, 1, 1);
+  
+  
+  vkCmdBindPipeline      (a_cmdBuff, VK_PIPELINE_BIND_POINT_COMPUTE, m_addNeighbourPipeline);
+  vkCmdBindDescriptorSets(a_cmdBuff, VK_PIPELINE_BIND_POINT_COMPUTE, m_addNeighbourPipelineLayout, 0, 1, &m_addNeighbourDS, 0, NULL);
+
+  vkCmdPushConstants(a_cmdBuff, m_addNeighbourPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(m_length), &m_length);
+  vkCmdPipelineBarrier(a_cmdBuff,
+  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, {}, 0, nullptr, 1, &barrier, 0, nullptr);
+  
+  vkCmdDispatch(a_cmdBuff, groupAmount, 1, 1);
 
   VK_CHECK_RESULT(vkEndCommandBuffer(a_cmdBuff));
 }
@@ -129,11 +193,14 @@ void SimpleCompute::CleanupPipeline()
   }
 
   vkDestroyBuffer(m_device, m_A, nullptr);
-  vkDestroyBuffer(m_device, m_B, nullptr);
-  vkDestroyBuffer(m_device, m_sum, nullptr);
+  vkDestroyBuffer(m_device, m_groupSums, nullptr);
+  vkDestroyBuffer(m_device, m_finalSums, nullptr);
 
-  vkDestroyPipelineLayout(m_device, m_layout, nullptr);
-  vkDestroyPipeline(m_device, m_pipeline, nullptr);
+  vkDestroyPipelineLayout(m_device, m_sumPipelineLayout, nullptr);
+  vkDestroyPipeline(m_device, m_sumPipeline, nullptr);
+  
+  vkDestroyPipelineLayout(m_device, m_addNeighbourPipelineLayout, nullptr);
+  vkDestroyPipeline(m_device, m_addNeighbourPipeline, nullptr);
 }
 
 
@@ -150,42 +217,59 @@ void SimpleCompute::Cleanup()
 
 void SimpleCompute::CreateComputePipeline()
 {
-  std::vector<uint32_t> code = vk_utils::readSPVFile("../resources/shaders/simple.comp.spv");
-  VkShaderModuleCreateInfo createInfo = {};
-  createInfo.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-  createInfo.pCode    = code.data();
-  createInfo.codeSize = code.size()*sizeof(uint32_t);
-    
-  VkShaderModule shaderModule;
-  VK_CHECK_RESULT(vkCreateShaderModule(m_device, &createInfo, NULL, &shaderModule));
+    // Thank you Roma for labda soulution
+  auto lambdaCreatePipeline = [this](std::string ShaderPath, size_t PushSize,
+      VkDescriptorSetLayout &DSLayout, VkPipelineLayout &PipeLayout, VkPipeline &Pipeline) {
+        
+          // Загружаем шейдер
+    std::vector<uint32_t> code          = vk_utils::readSPVFile(ShaderPath.c_str());
+    VkShaderModuleCreateInfo createInfo = {};
+    createInfo.sType                    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    createInfo.pCode                    = code.data();
+    createInfo.codeSize                 = code.size() * sizeof(uint32_t);
 
-  VkPipelineShaderStageCreateInfo shaderStageCreateInfo = {};
-  shaderStageCreateInfo.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-  shaderStageCreateInfo.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
-  shaderStageCreateInfo.module = shaderModule;
-  shaderStageCreateInfo.pName  = "main";
+    VkShaderModule shaderModule;
+    VK_CHECK_RESULT(vkCreateShaderModule(m_device, &createInfo, NULL, &shaderModule));
 
-  VkPushConstantRange pcRange = {};
-  pcRange.offset = 0;
-  pcRange.size = sizeof(m_length);
-  pcRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    VkPipelineShaderStageCreateInfo shaderStageCreateInfo = {};
+    shaderStageCreateInfo.sType                           = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    shaderStageCreateInfo.stage                           = VK_SHADER_STAGE_COMPUTE_BIT;
+    shaderStageCreateInfo.module                          = shaderModule;
+    shaderStageCreateInfo.pName                           = "main";
 
-  VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo = {};
-  pipelineLayoutCreateInfo.sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-  pipelineLayoutCreateInfo.setLayoutCount = 1;
-  pipelineLayoutCreateInfo.pSetLayouts    = &m_sumDSLayout;
-  pipelineLayoutCreateInfo.pushConstantRangeCount = 1;
-  pipelineLayoutCreateInfo.pPushConstantRanges = &pcRange;
-  VK_CHECK_RESULT(vkCreatePipelineLayout(m_device, &pipelineLayoutCreateInfo, NULL, &m_layout));
+    VkPushConstantRange pcRange = {};
+    pcRange.offset              = 0;
+    pcRange.size                = PushSize;
+    pcRange.stageFlags          = VK_SHADER_STAGE_COMPUTE_BIT;
 
-  VkComputePipelineCreateInfo pipelineCreateInfo = {};
-  pipelineCreateInfo.sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-  pipelineCreateInfo.stage  = shaderStageCreateInfo;
-  pipelineCreateInfo.layout = m_layout;
+    // Создаём layout для pipeline
+    VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo = {};
+    pipelineLayoutCreateInfo.sType                      = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipelineLayoutCreateInfo.setLayoutCount             = 1;
+    pipelineLayoutCreateInfo.pSetLayouts                = &DSLayout;
+    pipelineLayoutCreateInfo.pushConstantRangeCount     = 1;
+    pipelineLayoutCreateInfo.pPushConstantRanges        = &pcRange;
+    VK_CHECK_RESULT(vkCreatePipelineLayout(m_device, &pipelineLayoutCreateInfo, NULL, &PipeLayout));
 
-  VK_CHECK_RESULT(vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &pipelineCreateInfo, NULL, &m_pipeline));
+    VkComputePipelineCreateInfo pipelineCreateInfo = {};
+    pipelineCreateInfo.sType                       = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    pipelineCreateInfo.stage                       = shaderStageCreateInfo;
+    pipelineCreateInfo.layout                      = PipeLayout;
+    VK_CHECK_RESULT(vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &pipelineCreateInfo, NULL, &Pipeline));
 
-  vkDestroyShaderModule(m_device, shaderModule, nullptr);
+    vkDestroyShaderModule(m_device, shaderModule, nullptr);
+  };
+  
+   struct pushConst
+  {
+    uint totalLength;
+    uint depth;
+  };
+
+
+  lambdaCreatePipeline("../resources/shaders/simple.comp.spv", sizeof(pushConst), m_sumDSLayout, m_sumPipelineLayout, m_sumPipeline);
+  lambdaCreatePipeline("../resources/shaders/simple2.comp.spv", sizeof(m_length), m_addNeighbourDSLayout, m_addNeighbourPipelineLayout, m_addNeighbourPipeline);
+
 }
 
 
@@ -206,12 +290,29 @@ void SimpleCompute::Execute()
   fenceCreateInfo.flags = 0;
   VK_CHECK_RESULT(vkCreateFence(m_device, &fenceCreateInfo, NULL, &m_fence));
 
+  // Отправляем буфер команд на выполнение
   VK_CHECK_RESULT(vkQueueSubmit(m_computeQueue, 1, &submitInfo, m_fence));
 
+  //Ждём конца выполнения команд
   VK_CHECK_RESULT(vkWaitForFences(m_device, 1, &m_fence, VK_TRUE, 100000000000));
 
+  std::cout << "Initial" <<std::endl;
+
   std::vector<float> values(m_length);
-  m_pCopyHelper->ReadBuffer(m_sum, 0, values.data(), sizeof(float) * values.size());
+  m_pCopyHelper->ReadBuffer(m_A, 0, values.data(), sizeof(float) * values.size());
+  for (auto v: values) {
+    std::cout << v << ' ';
+  }
+
+  std::vector<float> values2(groupAmount);
+  std::cout << "\n\nSubsum" <<std::endl;
+  m_pCopyHelper->ReadBuffer(m_groupSums, 0, values2.data(), sizeof(float) * values2.size());
+  for (auto v: values2) {
+    std::cout << v << ' ';
+  }
+
+  std::cout << "\n\nFinalsum" <<std::endl;
+  m_pCopyHelper->ReadBuffer(m_finalSums, 0, values.data(), sizeof(float) * values.size());
   for (auto v: values) {
     std::cout << v << ' ';
   }

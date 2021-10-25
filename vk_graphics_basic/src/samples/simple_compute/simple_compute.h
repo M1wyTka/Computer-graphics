@@ -11,6 +11,8 @@
 #include <iostream>
 #include <memory>
 
+#define GROUP_SIZE 256
+
 class SimpleCompute : public ICompute
 {
 public:
@@ -58,7 +60,8 @@ private:
   std::shared_ptr<vk_utils::DescriptorMaker> m_pBindings = nullptr;
 
   uint32_t m_length  = 16u;
-  
+  uint32_t groupAmount = uint32_t(ceil(double(m_length) / GROUP_SIZE));
+
   VkPhysicalDeviceFeatures m_enabledDeviceFeatures = {};
   std::vector<const char*> m_deviceExtensions      = {};
   std::vector<const char*> m_instanceExtensions    = {};
@@ -69,11 +72,19 @@ private:
 
   VkDescriptorSet       m_sumDS; 
   VkDescriptorSetLayout m_sumDSLayout = nullptr;
-  
-  VkPipeline m_pipeline;
-  VkPipelineLayout m_layout;
+ 
+  VkDescriptorSet       m_repeatSumDS;
+  VkDescriptorSetLayout m_repeatSumDSLayout = nullptr;
 
-  VkBuffer m_A, m_B, m_sum;
+  VkDescriptorSet       m_addNeighbourDS;
+  VkDescriptorSetLayout m_addNeighbourDSLayout = nullptr;
+
+  VkPipeline m_sumPipeline;
+  VkPipeline m_addNeighbourPipeline;
+  VkPipelineLayout m_sumPipelineLayout;
+  VkPipelineLayout m_addNeighbourPipelineLayout;
+
+  VkBuffer m_A, m_groupSums, m_finalSums;
  
   void CreateInstance();
   void CreateDevice(uint32_t a_deviceId);

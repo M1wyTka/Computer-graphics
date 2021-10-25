@@ -1,30 +1,79 @@
 #version 430
 
-layout( local_size_x = 32 ) in;
+#define BLOCK_SIZE 256
+
+layout( local_size_x = BLOCK_SIZE ) in;
 
 layout( push_constant ) uniform params {
-  uint len;
+  uint totalLength;
+  uint depth;
 } PushConstant;
 
-layout(std430, binding = 0) buffer a 
+layout(std430, binding = 0) buffer Data
 {
-    float A[];
+    float data[];
 };
 
-layout(std430, binding = 1) buffer b
+layout(std430, binding = 1) buffer GroupSums
 {
-    float B[];
+    float groupSums[];
 };
 
-layout(std430, binding = 2) buffer Sum
+layout(std430, binding = 2) buffer Final
 {
-    float sum[];
+    float finalSums[];
 };
+
+shared float cache[BLOCK_SIZE];
 
 void main() 
 {
     uint idx = gl_GlobalInvocationID.x;
-    if (idx < PushConstant.len) {
-        sum[idx] = A[idx] + B[idx];
+    uint groupID = gl_WorkGroupID.x;
+    uint inGroupIDx = gl_LocalInvocationID.x;
+
+    uint blockLength;
+    uint blockStart = groupID * BLOCK_SIZE;
+    if((groupID + 1) * BLOCK_SIZE > PushConstant.totalLength)
+        blockLength = PushConstant.totalLength - blockStart;
+    else
+        blockLength = BLOCK_SIZE;
+
+    // Transfer meaningful block into cache
+    if (inGroupIDx < blockLength) 
+        cache[inGroupIDx] = data[idx];
+    else // Padding
+        cache[inGroupIDx] = 0;
+
+    // Bulding sum tree
+    for (uint offset = 1; offset <= BLOCK_SIZE/2; offset <<= 1) 
+    {
+        barrier();
+        if ((inGroupIDx + 1) % (offset*2) == 0)
+            cache[inGroupIDx] += cache[inGroupIDx - offset];
     }
+
+    // Get result from sum tree
+    barrier();
+    if(inGroupIDx == BLOCK_SIZE - 1)
+    {
+        groupSums[groupID] = cache[inGroupIDx];
+        cache[inGroupIDx] = 0;
+    }
+
+    for (uint offset = BLOCK_SIZE/2; offset >= 1; offset >>= 1) 
+    {
+        barrier();
+        if ((inGroupIDx + 1) % (offset*2) == 0)
+        {
+            float temp = cache[inGroupIDx];
+            cache[inGroupIDx] += cache[inGroupIDx - offset];
+            cache[inGroupIDx - offset] = temp;
+        }
+    }
+
+    // Store block result
+    if (inGroupIDx < blockLength)
+        finalSums[idx] = cache[inGroupIDx];
+
 }
