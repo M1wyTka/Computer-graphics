@@ -217,7 +217,7 @@ void SimpleCompute::Cleanup()
 
 void SimpleCompute::CreateComputePipeline()
 {
-    // Thank you Roma for labda soulution
+    // Thank you Roma for labda solution
   auto lambdaCreatePipeline = [this](std::string ShaderPath, size_t PushSize,
       VkDescriptorSetLayout &DSLayout, VkPipelineLayout &PipeLayout, VkPipeline &Pipeline) {
         

@@ -18,7 +18,11 @@
 class SimpleRender : public IRender
 {
 public:
-  const std::string VERTEX_SHADER_PATH = "../resources/shaders/simple.vert";
+
+  static constexpr uint32_t instanceAmount = 1000;
+  static constexpr uint32_t groupSize      = 128;
+
+  const std::string VERTEX_SHADER_PATH   = "../resources/shaders/simple.vert";
   const std::string FRAGMENT_SHADER_PATH = "../resources/shaders/simple.frag";
 
   SimpleRender(uint32_t a_width, uint32_t a_height);
@@ -82,19 +86,37 @@ protected:
   struct
   {
     LiteMath::float4x4 projView;
-    LiteMath::float4x4 model;
   } pushConst2M;
 
+  struct
+  {
+    LiteMath::float4x4 projView;
+    uint32_t amount;
+  } pushConstCulling;
+
   UniformParams m_uniforms {};
-  VkBuffer m_ubo = VK_NULL_HANDLE;
+  VkBuffer m_ubo            = VK_NULL_HANDLE;
   VkDeviceMemory m_uboAlloc = VK_NULL_HANDLE;
-  void* m_uboMappedMem = nullptr;
+  void *m_uboMappedMem      = nullptr;
 
   pipeline_data_t m_basicForwardPipeline {};
+  VkPipeline m_basicComputePipeline;
+  VkPipelineLayout m_basicComputePipelineLayout;
+  VkDescriptorSet m_basicComputeDS;
+  VkDescriptorSetLayout m_basicComputeDSLayout;
 
-  VkDescriptorSet m_dSet = VK_NULL_HANDLE;
+  std::shared_ptr<vk_utils::ICopyEngine> m_pCopyHelper;
+  VkBuffer m_bBoxes;
+  VkBuffer m_instanceMatrices;
+  VkBuffer m_indirectDraw;
+  VkBuffer m_modelInfos;
+  VkBuffer m_visibleInd;
+  std::vector<LiteMath::float4x4> m_instancePos;
+
+
+  VkDescriptorSet m_dSet             = VK_NULL_HANDLE;
   VkDescriptorSetLayout m_dSetLayout = VK_NULL_HANDLE;
-  VkRenderPass m_screenRenderPass = VK_NULL_HANDLE; // main renderpass
+  VkRenderPass m_screenRenderPass    = VK_NULL_HANDLE;// main renderpass
 
   std::shared_ptr<vk_utils::DescriptorMaker> m_pBindings = nullptr;
 
@@ -112,10 +134,10 @@ protected:
   //
 
   Camera   m_cam;
-  uint32_t m_width  = 1024u;
-  uint32_t m_height = 1024u;
+  uint32_t m_width          = 1024u;
+  uint32_t m_height         = 1024u;
   uint32_t m_framesInFlight = 2u;
-  bool m_vsync = false;
+  bool m_vsync              = false;
 
   VkPhysicalDeviceFeatures m_enabledDeviceFeatures = {};
   std::vector<const char*> m_deviceExtensions      = {};
@@ -141,7 +163,12 @@ protected:
   void CreateUniformBuffer();
   void UpdateUniformBuffer(float a_time);
 
+  void CreateCullingBuffers();
+  void FillCullingBuffers();
+  void CreateComputePipeline();
+
   void Cleanup();
+  void CleanupCulling();
 
   void SetupDeviceFeatures();
   void SetupDeviceExtensions();

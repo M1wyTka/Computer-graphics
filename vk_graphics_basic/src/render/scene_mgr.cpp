@@ -162,6 +162,14 @@ uint32_t SceneManager::AddMeshFromData(cmesh::SimpleMesh &meshData)
 
   m_meshInfos.push_back(info);
 
+  Box4f meshBox;
+  for (uint32_t i = 0; i < meshData.VerticesNum(); ++i)
+  {
+    meshBox.include(reinterpret_cast<float4 *>(meshData.vPos4f.data())[i]);
+  }
+
+  m_meshBboxes.push_back(meshBox);
+
   return m_meshInfos.size() - 1;
 }
 
@@ -179,6 +187,19 @@ uint32_t SceneManager::InstanceMesh(const uint32_t meshId, const LiteMath::float
   info.instBufOffset = (m_instanceMatrices.size() - 1) * sizeof(matrix);
 
   m_instanceInfos.push_back(info);
+
+   Box4f instBox;
+  for (uint32_t i = 0; i < 8; ++i) {
+    float4 corner = float4(
+      (i & 1) == 0 ? m_meshBboxes[meshId].boxMin.x : m_meshBboxes[meshId].boxMax.x,
+      (i & 2) == 0 ? m_meshBboxes[meshId].boxMin.y : m_meshBboxes[meshId].boxMax.y,
+      (i & 4) == 0 ? m_meshBboxes[meshId].boxMin.z : m_meshBboxes[meshId].boxMax.z,
+      1
+    );
+    instBox.include(matrix * corner);
+  }
+  sceneBbox.include(instBox);
+  m_instanceBboxes.push_back(instBox);
 
   return info.inst_id;
 }
@@ -200,11 +221,11 @@ void SceneManager::LoadGeoDataOnGPU()
   VkDeviceSize vertexBufSize = m_pMeshData->VertexDataSize();
   VkDeviceSize indexBufSize  = m_pMeshData->IndexDataSize();
   VkDeviceSize infoBufSize   = m_meshInfos.size() * sizeof(uint32_t) * 2;
+  VkDeviceSize matricesBufSize = sizeof(LiteMath::float4x4) * 1000;
 
   m_geoVertBuf  = vk_utils::createBuffer(m_device, vertexBufSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
   m_geoIdxBuf   = vk_utils::createBuffer(m_device, indexBufSize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
   m_meshInfoBuf = vk_utils::createBuffer(m_device, infoBufSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-
   VkMemoryAllocateFlags allocFlags{};
 
   m_geoMemAlloc = vk_utils::allocateAndBindWithPadding(m_device, m_physDevice, { m_geoVertBuf, m_geoIdxBuf, m_meshInfoBuf }, allocFlags);

@@ -54,27 +54,46 @@ struct SceneManager
     assert(meshId < m_meshInfos.size());
     return m_meshInfos[meshId];
   }
+
+  LiteMath::Box4f GetMeshBbox(uint32_t meshId) const
+  {
+    assert(meshId < m_meshBboxes.size());
+    return m_meshBboxes[meshId];
+  }
+
   InstanceInfo GetInstanceInfo(uint32_t instId) const
   {
     assert(instId < m_instanceInfos.size());
     return m_instanceInfos[instId];
   }
+
+  LiteMath::Box4f GetInstanceBbox(uint32_t instId) const
+  {
+    assert(instId < m_instanceBboxes.size());
+    return m_instanceBboxes[instId];
+  }
+
   LiteMath::float4x4 GetInstanceMatrix(uint32_t instId) const
   {
     assert(instId < m_instanceMatrices.size());
     return m_instanceMatrices[instId];
   }
 
+  LiteMath::Box4f GetSceneBbox() const { return sceneBbox; }
+
 private:
   void LoadGeoDataOnGPU();
 
   std::vector<MeshInfo> m_meshInfos      = {};
+  std::vector<LiteMath::Box4f> m_meshBboxes = {};
   std::shared_ptr<IMeshData> m_pMeshData = nullptr;
 
   std::vector<InstanceInfo> m_instanceInfos          = {};
+  std::vector<LiteMath::Box4f> m_instanceBboxes      = {};
   std::vector<LiteMath::float4x4> m_instanceMatrices = {};
 
   std::vector<hydra_xml::Camera> m_sceneCameras = {};
+  LiteMath::Box4f sceneBbox;
 
   uint32_t m_totalVertices = 0u;
   uint32_t m_totalIndices  = 0u;

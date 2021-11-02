@@ -14,22 +14,6 @@ SimpleRender::SimpleRender(uint32_t a_width, uint32_t a_height) : m_width(a_widt
 #endif
 }
 
-void SimpleRender::SetupDeviceFeatures()
-{
-  // m_enabledDeviceFeatures.fillModeNonSolid = VK_TRUE;
-}
-
-void SimpleRender::SetupDeviceExtensions()
-{
-  m_deviceExtensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
-}
-
-void SimpleRender::SetupValidationLayers()
-{
-  m_validationLayers.push_back("VK_LAYER_KHRONOS_validation");
-  m_validationLayers.push_back("VK_LAYER_LUNARG_monitor");
-}
-
 void SimpleRender::InitVulkan(const char** a_instanceExtensions, uint32_t a_instanceExtensionsCount, uint32_t a_deviceId)
 {
   for(size_t i = 0; i < a_instanceExtensionsCount; ++i)
@@ -62,6 +46,54 @@ void SimpleRender::InitVulkan(const char** a_instanceExtensions, uint32_t a_inst
 
   m_pScnMgr = std::make_shared<SceneManager>(m_device, m_physicalDevice, m_queueFamilyIDXs.transfer,
                                              m_queueFamilyIDXs.graphics, false);
+  m_pCopyHelper = std::make_shared<vk_utils::SimpleCopyHelper>(m_physicalDevice, m_device, m_transferQueue, m_queueFamilyIDXs.compute, 8 * 1024 * 1024);
+}
+
+void SimpleRender::SetupValidationLayers()
+{
+  m_validationLayers.push_back("VK_LAYER_KHRONOS_validation");
+  m_validationLayers.push_back("VK_LAYER_LUNARG_monitor");
+}
+
+void SimpleRender::CreateInstance()
+{
+  VkApplicationInfo appInfo  = {};
+  appInfo.sType              = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+  appInfo.pNext              = nullptr;
+  appInfo.pApplicationName   = "VkRender";
+  appInfo.applicationVersion = VK_MAKE_VERSION(0, 1, 0);
+  appInfo.pEngineName        = "SimpleForward";
+  appInfo.engineVersion      = VK_MAKE_VERSION(0, 1, 0);
+  appInfo.apiVersion         = VK_MAKE_VERSION(1, 1, 0);
+
+  m_instance = vk_utils::createInstance(m_enableValidation, m_validationLayers, m_instanceExtensions, &appInfo);
+
+  if (m_enableValidation)
+    vk_utils::initDebugReportCallback(m_instance, &debugReportCallbackFn, &m_debugReportCallback);
+}
+
+void SimpleRender::CreateDevice(uint32_t a_deviceId)
+{
+  SetupDeviceExtensions();
+  m_physicalDevice = vk_utils::findPhysicalDevice(m_instance, true, a_deviceId, m_deviceExtensions);
+
+  SetupDeviceFeatures();
+  m_device = vk_utils::createLogicalDevice(m_physicalDevice, m_validationLayers, m_deviceExtensions, m_enabledDeviceFeatures, m_queueFamilyIDXs, VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_TRANSFER_BIT);
+
+  vkGetDeviceQueue(m_device, m_queueFamilyIDXs.graphics, 0, &m_graphicsQueue);
+  vkGetDeviceQueue(m_device, m_queueFamilyIDXs.transfer, 0, &m_transferQueue);
+}
+
+void SimpleRender::SetupDeviceExtensions()
+{
+  m_deviceExtensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+}
+
+void SimpleRender::SetupDeviceFeatures()
+{
+  // m_enabledDeviceFeatures.fillModeNonSolid = VK_TRUE;
+  m_enabledDeviceFeatures.multiDrawIndirect         = true;
+  m_enabledDeviceFeatures.drawIndirectFirstInstance = true;
 }
 
 void SimpleRender::InitPresentation(VkSurfaceKHR &a_surface)
@@ -92,51 +124,102 @@ void SimpleRender::InitPresentation(VkSurfaceKHR &a_surface)
   m_pGUIRender = std::make_shared<ImGuiRender>(m_instance, m_device, m_physicalDevice, m_queueFamilyIDXs.graphics, m_graphicsQueue, m_swapchain);
 }
 
-void SimpleRender::CreateInstance()
+void SimpleRender::LoadScene(const char *path, bool transpose_inst_matrices)
 {
-  VkApplicationInfo appInfo = {};
-  appInfo.sType              = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-  appInfo.pNext              = nullptr;
-  appInfo.pApplicationName   = "VkRender";
-  appInfo.applicationVersion = VK_MAKE_VERSION(0, 1, 0);
-  appInfo.pEngineName        = "SimpleForward";
-  appInfo.engineVersion      = VK_MAKE_VERSION(0, 1, 0);
-  appInfo.apiVersion         = VK_MAKE_VERSION(1, 1, 0);
+  m_pScnMgr->LoadSceneXML(path, transpose_inst_matrices);
 
-  m_instance = vk_utils::createInstance(m_enableValidation, m_validationLayers, m_instanceExtensions, &appInfo);
+  CreateUniformBuffer();
+  CreateCullingBuffers();
+  SetupSimplePipeline();
+  CreateComputePipeline();
+  FillCullingBuffers();
 
-  if (m_enableValidation)
-    vk_utils::initDebugReportCallback(m_instance, &debugReportCallbackFn, &m_debugReportCallback);
+
+  UpdateView();
+
+  for (size_t i = 0; i < m_framesInFlight; ++i)
+  {
+    BuildCommandBufferSimple(m_cmdBuffersDrawMain[i], m_frameBuffers[i], m_swapchain.GetAttachment(i).view, m_basicForwardPipeline.pipeline);
+  }
 }
 
-void SimpleRender::CreateDevice(uint32_t a_deviceId)
+void SimpleRender::CreateUniformBuffer()
 {
-  SetupDeviceExtensions();
-  m_physicalDevice = vk_utils::findPhysicalDevice(m_instance, true, a_deviceId, m_deviceExtensions);
+  VkMemoryRequirements memReq;
+  m_ubo = vk_utils::createBuffer(m_device, sizeof(UniformParams), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, &memReq);
 
-  SetupDeviceFeatures();
-  m_device = vk_utils::createLogicalDevice(m_physicalDevice, m_validationLayers, m_deviceExtensions,
-                                           m_enabledDeviceFeatures, m_queueFamilyIDXs,
-                                           VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_TRANSFER_BIT);
+  VkMemoryAllocateInfo allocateInfo = {};
+  allocateInfo.sType                = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+  allocateInfo.pNext                = nullptr;
+  allocateInfo.allocationSize       = memReq.size;
+  allocateInfo.memoryTypeIndex      = vk_utils::findMemoryType(memReq.memoryTypeBits,
+    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+    m_physicalDevice);
+  VK_CHECK_RESULT(vkAllocateMemory(m_device, &allocateInfo, nullptr, &m_uboAlloc));
 
-  vkGetDeviceQueue(m_device, m_queueFamilyIDXs.graphics, 0, &m_graphicsQueue);
-  vkGetDeviceQueue(m_device, m_queueFamilyIDXs.transfer, 0, &m_transferQueue);
+  VK_CHECK_RESULT(vkBindBufferMemory(m_device, m_ubo, m_uboAlloc, 0));
+
+  vkMapMemory(m_device, m_uboAlloc, 0, sizeof(m_uniforms), 0, &m_uboMappedMem);
+
+  m_uniforms.lightPos          = LiteMath::float3(0.0f, 1.0f, 1.0f);
+  m_uniforms.baseColor         = LiteMath::float3(0.9f, 0.92f, 1.0f);
+  m_uniforms.animateLightColor = true;
+
+  UpdateUniformBuffer(0.0f);
+}
+
+void SimpleRender::UpdateUniformBuffer(float a_time)
+{
+  // most uniforms are updated in GUI -> SetupGUIElements()
+  m_uniforms.time = a_time;
+
+  memcpy(m_uboMappedMem, &m_uniforms, sizeof(m_uniforms));
+}
+
+void SimpleRender::CreateCullingBuffers()
+{
+  m_bBoxes           = vk_utils::createBuffer(m_device, sizeof(LiteMath::Box4f), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+  m_instanceMatrices = vk_utils::createBuffer(m_device, sizeof(LiteMath::float4x4) * instanceAmount, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+
+  struct ModInf
+  {
+    uint32_t indexCount;
+    uint32_t indexOffset;
+    uint32_t vertexOffset;
+  };
+  m_modelInfos = vk_utils::createBuffer(m_device, sizeof(ModInf), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+  m_visibleInd = vk_utils::createBuffer(m_device, sizeof(uint32_t) * instanceAmount, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+
+  m_indirectDraw = vk_utils::createBuffer(m_device, sizeof(VkDrawIndexedIndirectCommand), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+  vk_utils::allocateAndBindWithPadding(m_device, m_physicalDevice, { m_bBoxes, m_instanceMatrices, m_modelInfos, m_visibleInd, m_indirectDraw }, 0);
 }
 
 
 void SimpleRender::SetupSimplePipeline()
 {
   std::vector<std::pair<VkDescriptorType, uint32_t> > dtypes = {
-      {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             1}
+    { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4 }, { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 7 }
   };
 
-  if(m_pBindings == nullptr)
-    m_pBindings = std::make_shared<vk_utils::DescriptorMaker>(m_device, dtypes, 1);
+  if (m_pBindings == nullptr)
+    m_pBindings = std::make_shared<vk_utils::DescriptorMaker>(m_device, dtypes, 4);
 
-  m_pBindings->BindBegin(VK_SHADER_STAGE_FRAGMENT_BIT);
+  // Создание descriptor set для передачи буферов в шейдер
+  m_pBindings->BindBegin(VK_SHADER_STAGE_COMPUTE_BIT);
+  m_pBindings->BindBuffer(0, m_bBoxes);
+  m_pBindings->BindBuffer(1, m_instanceMatrices);
+  m_pBindings->BindBuffer(2, m_modelInfos);
+  m_pBindings->BindBuffer(3, m_visibleInd);
+  m_pBindings->BindBuffer(4, m_indirectDraw);
+  m_pBindings->BindEnd(&m_basicComputeDS, &m_basicComputeDSLayout);
+
+  m_pBindings->BindBegin(VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT);
   m_pBindings->BindBuffer(0, m_ubo, VK_NULL_HANDLE, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+  m_pBindings->BindBuffer(1, m_instanceMatrices);
+  m_pBindings->BindBuffer(2, m_visibleInd);
   m_pBindings->BindEnd(&m_dSet, &m_dSetLayout);
 
+ 
   // if we are recreating pipeline (for example, to reload shaders)
   // we need to cleanup old pipeline
   if(m_basicForwardPipeline.layout != VK_NULL_HANDLE)
@@ -157,45 +240,88 @@ void SimpleRender::SetupSimplePipeline()
   shader_paths[VK_SHADER_STAGE_VERTEX_BIT]   = VERTEX_SHADER_PATH + ".spv";
 
   maker.LoadShaders(m_device, shader_paths);
+  m_basicForwardPipeline.layout = maker.MakeLayout(m_device, { m_dSetLayout }, sizeof(pushConst2M));
 
-  m_basicForwardPipeline.layout = maker.MakeLayout(m_device, {m_dSetLayout}, sizeof(pushConst2M));
   maker.SetDefaultState(m_width, m_height);
 
   m_basicForwardPipeline.pipeline = maker.MakePipeline(m_device, m_pScnMgr->GetPipelineVertexInputStateCreateInfo(),
                                                        m_screenRenderPass, {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR});
 }
 
-void SimpleRender::CreateUniformBuffer()
+void SimpleRender::CreateComputePipeline() 
 {
-  VkMemoryRequirements memReq;
-  m_ubo = vk_utils::createBuffer(m_device, sizeof(UniformParams), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, &memReq);
+  /////////////////////////////
+  auto lambdaCreatePipeline = [this](std::string ShaderPath, size_t PushSize, VkDescriptorSetLayout &DSLayout, VkPipelineLayout &PipeLayout, VkPipeline &Pipeline) {
+    // Загружаем шейдер
+    std::vector<uint32_t> code          = vk_utils::readSPVFile(ShaderPath.c_str());
+    VkShaderModuleCreateInfo createInfo = {};
+    createInfo.sType                    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    createInfo.pCode                    = code.data();
+    createInfo.codeSize                 = code.size() * sizeof(uint32_t);
 
-  VkMemoryAllocateInfo allocateInfo = {};
-  allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-  allocateInfo.pNext = nullptr;
-  allocateInfo.allocationSize = memReq.size;
-  allocateInfo.memoryTypeIndex = vk_utils::findMemoryType(memReq.memoryTypeBits,
-                                                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                                                          m_physicalDevice);
-  VK_CHECK_RESULT(vkAllocateMemory(m_device, &allocateInfo, nullptr, &m_uboAlloc));
+    VkShaderModule shaderModule;
+    VK_CHECK_RESULT(vkCreateShaderModule(m_device, &createInfo, NULL, &shaderModule));
 
-  VK_CHECK_RESULT(vkBindBufferMemory(m_device, m_ubo, m_uboAlloc, 0));
+    VkPipelineShaderStageCreateInfo shaderStageCreateInfo = {};
+    shaderStageCreateInfo.sType                           = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    shaderStageCreateInfo.stage                           = VK_SHADER_STAGE_COMPUTE_BIT;
+    shaderStageCreateInfo.module                          = shaderModule;
+    shaderStageCreateInfo.pName                           = "main";
 
-  vkMapMemory(m_device, m_uboAlloc, 0, sizeof(m_uniforms), 0, &m_uboMappedMem);
+    VkPushConstantRange pcRange = {};
+    pcRange.offset              = 0;
+    pcRange.size                = PushSize;
+    pcRange.stageFlags          = VK_SHADER_STAGE_COMPUTE_BIT;
 
-  m_uniforms.lightPos = LiteMath::float3(0.0f, 1.0f, 1.0f);
-  m_uniforms.baseColor = LiteMath::float3(0.9f, 0.92f, 1.0f);
-  m_uniforms.animateLightColor = true;
+    // Создаём layout для pipeline
+    VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo = {};
+    pipelineLayoutCreateInfo.sType                      = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipelineLayoutCreateInfo.setLayoutCount             = 1;
+    pipelineLayoutCreateInfo.pSetLayouts                = &DSLayout;
+    pipelineLayoutCreateInfo.pushConstantRangeCount     = 1;
+    pipelineLayoutCreateInfo.pPushConstantRanges        = &pcRange;
+    VK_CHECK_RESULT(vkCreatePipelineLayout(m_device, &pipelineLayoutCreateInfo, NULL, &PipeLayout));
 
-  UpdateUniformBuffer(0.0f);
+    VkComputePipelineCreateInfo pipelineCreateInfo = {};
+    pipelineCreateInfo.sType                       = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    pipelineCreateInfo.stage                       = shaderStageCreateInfo;
+    pipelineCreateInfo.layout                      = PipeLayout;
+    VK_CHECK_RESULT(vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &pipelineCreateInfo, NULL, &Pipeline));
+
+    vkDestroyShaderModule(m_device, shaderModule, nullptr);
+  };
+  lambdaCreatePipeline("../resources/shaders/culling.comp.spv", sizeof(pushConstCulling), m_basicComputeDSLayout, m_basicComputePipelineLayout, m_basicComputePipeline);
 }
 
-void SimpleRender::UpdateUniformBuffer(float a_time)
+void SimpleRender::FillCullingBuffers() 
 {
-// most uniforms are updated in GUI -> SetupGUIElements()
-  m_uniforms.time = a_time;
-  memcpy(m_uboMappedMem, &m_uniforms, sizeof(m_uniforms));
+  std::vector<LiteMath::Box4f> temp;
+  temp.push_back(m_pScnMgr->GetInstanceBbox(1));
+  m_pCopyHelper->UpdateBuffer(m_bBoxes, 0, temp.data(), sizeof(LiteMath::Box4f) * temp.size());
+
+  std::vector<LiteMath::float4x4> temp2;
+  LiteMath::float3 corner = LiteMath::float3(0, 0, 0);
+  for (uint32_t i = 0; i < instanceAmount / 50; i++)
+  {
+    for (uint32_t j = 0; j < 50; j++)
+    {
+      LiteMath::float3 offset = corner + LiteMath::float3(j, -2, i);
+      LiteMath::float4x4 mat  = LiteMath::translate4x4(offset) * LiteMath::scale4x4(vec3(1, 1, 1));
+      m_instancePos.push_back(mat);
+    }
+  }
+  m_pCopyHelper->UpdateBuffer(m_instanceMatrices, 0, m_instancePos.data(), sizeof(LiteMath::float4x4) * m_instancePos.size());
+
+
+  struct ModInf
+  {
+    uint32_t indexCount;
+    uint32_t indexOffset;
+    uint32_t vertexOffset;
+  };
+  auto mesh_info = m_pScnMgr->GetMeshInfo(1);
+  ModInf modinf{ mesh_info.m_indNum, mesh_info.m_indexOffset, mesh_info.m_vertexOffset };
+  m_pCopyHelper->UpdateBuffer(m_modelInfos, 0, &modinf, sizeof(ModInf));
 }
 
 void SimpleRender::BuildCommandBufferSimple(VkCommandBuffer a_cmdBuff, VkFramebuffer a_frameBuff,
@@ -208,9 +334,40 @@ void SimpleRender::BuildCommandBufferSimple(VkCommandBuffer a_cmdBuff, VkFramebu
   beginInfo.flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
 
   VK_CHECK_RESULT(vkBeginCommandBuffer(a_cmdBuff, &beginInfo));
+  {
+    /// Compute what to display
+    pushConstCulling.amount = instanceAmount;
+    vkCmdBindPipeline(a_cmdBuff, VK_PIPELINE_BIND_POINT_COMPUTE, m_basicComputePipeline);
+    vkCmdBindDescriptorSets(a_cmdBuff, VK_PIPELINE_BIND_POINT_COMPUTE, m_basicComputePipelineLayout, 0, 1, &m_basicComputeDS, 0, NULL);
+    vkCmdPushConstants(a_cmdBuff, m_basicComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstCulling), &pushConstCulling);
+
+    vkCmdDispatch(a_cmdBuff, 1, 1, 1);
+  }
+
+  VkBufferMemoryBarrier barrier = {};
+  barrier.sType                 = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+  barrier.srcAccessMask         = VK_ACCESS_SHADER_WRITE_BIT;
+  barrier.dstAccessMask         = VK_ACCESS_SHADER_READ_BIT;
+  barrier.buffer                = m_visibleInd;
+  barrier.offset                = 0;
+  barrier.size                  = sizeof(VkDrawIndirectCommand);
+
+  VkBufferMemoryBarrier barrier2 = {};
+  barrier2.sType                 = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+  barrier2.pNext                 = nullptr;
+  barrier2.srcAccessMask         = VK_ACCESS_SHADER_WRITE_BIT;
+  barrier2.dstAccessMask         = VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+  barrier2.buffer                = m_indirectDraw;
+  barrier2.offset                = 0;
+  barrier2.size                  = VK_WHOLE_SIZE;
+
+  VkBufferMemoryBarrier barriers[2]{ barrier, barrier2 };
+
+  vkCmdPipelineBarrier(a_cmdBuff, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, {}, 0, nullptr, 1, barriers, 0, nullptr);
 
   vk_utils::setDefaultViewport(a_cmdBuff, static_cast<float>(m_width), static_cast<float>(m_height));
   vk_utils::setDefaultScissor(a_cmdBuff, m_width, m_height);
+
 
   ///// draw final scene to screen
   {
@@ -242,62 +399,19 @@ void SimpleRender::BuildCommandBufferSimple(VkCommandBuffer a_cmdBuff, VkFramebu
     vkCmdBindVertexBuffers(a_cmdBuff, 0, 1, &vertexBuf, &zero_offset);
     vkCmdBindIndexBuffer(a_cmdBuff, indexBuf, 0, VK_INDEX_TYPE_UINT32);
 
-    for (size_t i = 0; i < m_pScnMgr->InstancesNum(); ++i)
-    {
-      auto inst = m_pScnMgr->GetInstanceInfo(i);
+    int rabbitId = 1;
+    auto inst    = m_pScnMgr->GetInstanceInfo(rabbitId);
 
-      pushConst2M.model = m_pScnMgr->GetInstanceMatrix(i);
-      vkCmdPushConstants(a_cmdBuff, m_basicForwardPipeline.layout, stageFlags, 0,
-                         sizeof(pushConst2M), &pushConst2M);
-
-      auto mesh_info = m_pScnMgr->GetMeshInfo(inst.mesh_id);
-      vkCmdDrawIndexed(a_cmdBuff, mesh_info.m_indNum, 1, mesh_info.m_indexOffset, mesh_info.m_vertexOffset, 0);
-    }
+    auto mesh_info = m_pScnMgr->GetMeshInfo(inst.mesh_id);
+    vkCmdPushConstants(a_cmdBuff, m_basicForwardPipeline.layout, stageFlags, 0, sizeof(pushConst2M), &pushConst2M);
+    vkCmdDrawIndexedIndirect(a_cmdBuff, m_indirectDraw, 0, 1, 0);
 
     vkCmdEndRenderPass(a_cmdBuff);
   }
 
   VK_CHECK_RESULT(vkEndCommandBuffer(a_cmdBuff));
 }
-
-
-void SimpleRender::CleanupPipelineAndSwapchain()
-{
-  if (!m_cmdBuffersDrawMain.empty())
-  {
-    vkFreeCommandBuffers(m_device, m_commandPool, static_cast<uint32_t>(m_cmdBuffersDrawMain.size()),
-                         m_cmdBuffersDrawMain.data());
-    m_cmdBuffersDrawMain.clear();
-  }
-
-  for (size_t i = 0; i < m_frameFences.size(); i++)
-  {
-    if(m_frameFences[i] != VK_NULL_HANDLE)
-    {
-      vkDestroyFence(m_device, m_frameFences[i], nullptr);
-      m_frameFences[i] = VK_NULL_HANDLE;
-    }
-  }
-
-  vk_utils::deleteImg(m_device, &m_depthBuffer);
-
-  for (size_t i = 0; i < m_frameBuffers.size(); i++)
-  {
-    if(m_frameBuffers[i] != VK_NULL_HANDLE)
-    {
-      vkDestroyFramebuffer(m_device, m_frameBuffers[i], nullptr);
-      m_frameBuffers[i] = VK_NULL_HANDLE;
-    }
-  }
-
-  if(m_screenRenderPass != VK_NULL_HANDLE)
-  {
-    vkDestroyRenderPass(m_device, m_screenRenderPass, nullptr);
-    m_screenRenderPass = VK_NULL_HANDLE;
-  }
-
-  m_swapchain.Cleanup();
-}
+///////////////////////////////////////////////////////////////////////
 
 void SimpleRender::RecreateSwapChain()
 {
@@ -343,6 +457,7 @@ void SimpleRender::Cleanup()
   m_pGUIRender = nullptr;
   ImGui::DestroyContext();
   CleanupPipelineAndSwapchain();
+  CleanupCulling();
   if(m_surface != VK_NULL_HANDLE)
   {
     vkDestroySurfaceKHR(m_instance, m_surface, nullptr);
@@ -359,7 +474,6 @@ void SimpleRender::Cleanup()
     vkDestroyPipelineLayout(m_device, m_basicForwardPipeline.layout, nullptr);
     m_basicForwardPipeline.layout = VK_NULL_HANDLE;
   }
-
   if (m_presentationResources.imageAvailable != VK_NULL_HANDLE)
   {
     vkDestroySemaphore(m_device, m_presentationResources.imageAvailable, nullptr);
@@ -389,6 +503,11 @@ void SimpleRender::Cleanup()
     m_uboAlloc = VK_NULL_HANDLE;
   }
 
+  if (m_commandPool != VK_NULL_HANDLE)
+  {
+    vkDestroyCommandPool(m_device, m_commandPool, nullptr);
+  }
+
 //  vk_utils::deleteImg(m_device, &m_depthBuffer); // already deleted with swapchain
 
   if(m_depthBuffer.mem != VK_NULL_HANDLE)
@@ -416,6 +535,75 @@ void SimpleRender::Cleanup()
   {
     vkDestroyInstance(m_instance, nullptr);
     m_instance = VK_NULL_HANDLE;
+  }
+}
+
+void SimpleRender::CleanupPipelineAndSwapchain()
+{
+  if (!m_cmdBuffersDrawMain.empty())
+  {
+    vkFreeCommandBuffers(m_device, m_commandPool, static_cast<uint32_t>(m_cmdBuffersDrawMain.size()), m_cmdBuffersDrawMain.data());
+    m_cmdBuffersDrawMain.clear();
+  }
+
+  for (size_t i = 0; i < m_frameFences.size(); i++)
+  {
+    if (m_frameFences[i] != VK_NULL_HANDLE)
+    {
+      vkDestroyFence(m_device, m_frameFences[i], nullptr);
+      m_frameFences[i] = VK_NULL_HANDLE;
+    }
+  }
+
+  vk_utils::deleteImg(m_device, &m_depthBuffer);
+
+  for (size_t i = 0; i < m_frameBuffers.size(); i++)
+  {
+    if (m_frameBuffers[i] != VK_NULL_HANDLE)
+    {
+      vkDestroyFramebuffer(m_device, m_frameBuffers[i], nullptr);
+      m_frameBuffers[i] = VK_NULL_HANDLE;
+    }
+  }
+  m_frameBuffers.clear();
+  if (m_screenRenderPass != VK_NULL_HANDLE)
+  {
+    vkDestroyRenderPass(m_device, m_screenRenderPass, nullptr);
+    m_screenRenderPass = VK_NULL_HANDLE;
+  }
+
+  m_swapchain.Cleanup();
+}
+
+void SimpleRender::CleanupCulling()
+{
+  if (m_basicComputePipelineLayout != VK_NULL_HANDLE)
+  {
+    vkDestroyPipelineLayout(m_device, m_basicComputePipelineLayout, nullptr);
+    m_basicComputePipelineLayout = VK_NULL_HANDLE;
+  }
+  if (m_basicComputePipeline != VK_NULL_HANDLE)
+  {
+    vkDestroyPipeline(m_device, m_basicComputePipeline, nullptr);
+    m_basicComputePipeline = VK_NULL_HANDLE;
+  }
+
+  if (m_bBoxes != VK_NULL_HANDLE)
+  {
+    vkDestroyBuffer(m_device, m_bBoxes, nullptr);
+    m_bBoxes = VK_NULL_HANDLE;
+  }
+
+  if (m_instanceMatrices != VK_NULL_HANDLE)
+  {
+    vkDestroyBuffer(m_device, m_instanceMatrices, nullptr);
+    m_instanceMatrices = VK_NULL_HANDLE;
+  }
+
+  if (m_modelInfos != VK_NULL_HANDLE)
+  {
+    vkDestroyBuffer(m_device, m_modelInfos, nullptr);
+    m_modelInfos = VK_NULL_HANDLE;
   }
 }
 
@@ -459,23 +647,104 @@ void SimpleRender::UpdateView()
   auto mLookAt         = LiteMath::lookAt(m_cam.pos, m_cam.lookAt, m_cam.up);
   auto mWorldViewProj  = mProjFix * mProj * mLookAt;
   pushConst2M.projView = mWorldViewProj;
+  pushConstCulling.projView = mWorldViewProj;
 }
 
-void SimpleRender::LoadScene(const char* path, bool transpose_inst_matrices)
+void SimpleRender::DrawFrame(float a_time, DrawMode a_mode)
 {
-  m_pScnMgr->LoadSceneXML(path, transpose_inst_matrices);
-
-  CreateUniformBuffer();
-  SetupSimplePipeline();
-
-  UpdateView();
-
-  for (size_t i = 0; i < m_framesInFlight; ++i)
+  UpdateUniformBuffer(a_time);
+  switch (a_mode)
   {
-    BuildCommandBufferSimple(m_cmdBuffersDrawMain[i], m_frameBuffers[i],
-                             m_swapchain.GetAttachment(i).view, m_basicForwardPipeline.pipeline);
+  case DrawMode::WITH_GUI:
+    SetupGUIElements();
+    DrawFrameWithGUI();
+    break;
+  case DrawMode::NO_GUI:
+    DrawFrameSimple();
+    break;
+  default:
+    DrawFrameSimple();
   }
 }
+
+void SimpleRender::SetupGUIElements()
+{
+  ImGui_ImplVulkan_NewFrame();
+  ImGui_ImplGlfw_NewFrame();
+  ImGui::NewFrame();
+  {
+    //    ImGui::ShowDemoWindow();
+    ImGui::Begin("Simple render settings");
+
+    ImGui::ColorEdit3("Meshes base color", m_uniforms.baseColor.M, ImGuiColorEditFlags_PickerHueWheel | ImGuiColorEditFlags_NoInputs);
+    ImGui::Checkbox("Animate light source color", &m_uniforms.animateLightColor);
+    ImGui::SliderFloat3("Light source position", m_uniforms.lightPos.M, -10.f, 10.f);
+
+    ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
+
+    ImGui::NewLine();
+
+    ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "Press 'B' to recompile and reload shaders");
+    ImGui::Text("Changing bindings is not supported.");
+    ImGui::Text("Vertex shader path: %s", VERTEX_SHADER_PATH.c_str());
+    ImGui::Text("Fragment shader path: %s", FRAGMENT_SHADER_PATH.c_str());
+    ImGui::End();
+  }
+
+  // Rendering
+  ImGui::Render();
+}
+
+void SimpleRender::DrawFrameWithGUI()
+{
+  vkWaitForFences(m_device, 1, &m_frameFences[m_presentationResources.currentFrame], VK_TRUE, UINT64_MAX);
+  vkResetFences(m_device, 1, &m_frameFences[m_presentationResources.currentFrame]);
+
+  uint32_t imageIdx;
+  m_swapchain.AcquireNextImage(m_presentationResources.imageAvailable, &imageIdx);
+
+  auto currentCmdBuf = m_cmdBuffersDrawMain[imageIdx];
+
+  VkSemaphore waitSemaphores[]      = { m_presentationResources.imageAvailable };
+  VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
+
+  BuildCommandBufferSimple(currentCmdBuf, m_frameBuffers[imageIdx], m_swapchain.GetAttachment(imageIdx).view, m_basicForwardPipeline.pipeline);
+
+  ImDrawData *pDrawData = ImGui::GetDrawData();
+  auto currentGUICmdBuf = m_pGUIRender->BuildGUIRenderCommand(imageIdx, pDrawData);
+
+  std::vector<VkCommandBuffer> submitCmdBufs = { currentCmdBuf, currentGUICmdBuf };
+
+  VkSubmitInfo submitInfo       = {};
+  submitInfo.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+  submitInfo.waitSemaphoreCount = 1;
+  submitInfo.pWaitSemaphores    = waitSemaphores;
+  submitInfo.pWaitDstStageMask  = waitStages;
+  submitInfo.commandBufferCount = submitCmdBufs.size();
+  submitInfo.pCommandBuffers    = submitCmdBufs.data();
+
+  VkSemaphore signalSemaphores[]  = { m_presentationResources.renderingFinished };
+  submitInfo.signalSemaphoreCount = 1;
+  submitInfo.pSignalSemaphores    = signalSemaphores;
+
+  VK_CHECK_RESULT(vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, m_frameFences[m_presentationResources.currentFrame]));
+
+  VkResult presentRes = m_swapchain.QueuePresent(m_presentationResources.queue, imageIdx, m_presentationResources.renderingFinished);
+
+  if (presentRes == VK_ERROR_OUT_OF_DATE_KHR || presentRes == VK_SUBOPTIMAL_KHR)
+  {
+    RecreateSwapChain();
+  }
+  else if (presentRes != VK_SUCCESS)
+  {
+    RUN_TIME_ERROR("Failed to present swapchain image");
+  }
+
+  m_presentationResources.currentFrame = (m_presentationResources.currentFrame + 1) % m_framesInFlight;
+
+  vkQueueWaitIdle(m_presentationResources.queue);
+}
+
 
 void SimpleRender::DrawFrameSimple()
 {
@@ -509,106 +778,6 @@ void SimpleRender::DrawFrameSimple()
 
   VkResult presentRes = m_swapchain.QueuePresent(m_presentationResources.queue, imageIdx,
                                                  m_presentationResources.renderingFinished);
-
-  if (presentRes == VK_ERROR_OUT_OF_DATE_KHR || presentRes == VK_SUBOPTIMAL_KHR)
-  {
-    RecreateSwapChain();
-  }
-  else if (presentRes != VK_SUCCESS)
-  {
-    RUN_TIME_ERROR("Failed to present swapchain image");
-  }
-
-  m_presentationResources.currentFrame = (m_presentationResources.currentFrame + 1) % m_framesInFlight;
-
-  vkQueueWaitIdle(m_presentationResources.queue);
-}
-
-void SimpleRender::DrawFrame(float a_time, DrawMode a_mode)
-{
-  UpdateUniformBuffer(a_time);
-  switch (a_mode)
-  {
-  case DrawMode::WITH_GUI:
-    SetupGUIElements();
-    DrawFrameWithGUI();
-    break;
-  case DrawMode::NO_GUI:
-    DrawFrameSimple();
-    break;
-  default:
-    DrawFrameSimple();
-  }
-}
-
-
-/////////////////////////////////
-
-void SimpleRender::SetupGUIElements()
-{
-  ImGui_ImplVulkan_NewFrame();
-  ImGui_ImplGlfw_NewFrame();
-  ImGui::NewFrame();
-  {
-//    ImGui::ShowDemoWindow();
-    ImGui::Begin("Simple render settings");
-
-    ImGui::ColorEdit3("Meshes base color", m_uniforms.baseColor.M, ImGuiColorEditFlags_PickerHueWheel | ImGuiColorEditFlags_NoInputs);
-    ImGui::Checkbox("Animate light source color", &m_uniforms.animateLightColor);
-    ImGui::SliderFloat3("Light source position", m_uniforms.lightPos.M, -10.f, 10.f);
-
-    ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
-
-    ImGui::NewLine();
-
-    ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f),"Press 'B' to recompile and reload shaders");
-    ImGui::Text("Changing bindings is not supported.");
-    ImGui::Text("Vertex shader path: %s", VERTEX_SHADER_PATH.c_str());
-    ImGui::Text("Fragment shader path: %s", FRAGMENT_SHADER_PATH.c_str());
-    ImGui::End();
-  }
-
-  // Rendering
-  ImGui::Render();
-}
-
-void SimpleRender::DrawFrameWithGUI()
-{
-  vkWaitForFences(m_device, 1, &m_frameFences[m_presentationResources.currentFrame], VK_TRUE, UINT64_MAX);
-  vkResetFences(m_device, 1, &m_frameFences[m_presentationResources.currentFrame]);
-
-  uint32_t imageIdx;
-  m_swapchain.AcquireNextImage(m_presentationResources.imageAvailable, &imageIdx);
-
-  auto currentCmdBuf = m_cmdBuffersDrawMain[imageIdx];
-
-  VkSemaphore waitSemaphores[] = {m_presentationResources.imageAvailable};
-  VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-
-  BuildCommandBufferSimple(currentCmdBuf, m_frameBuffers[imageIdx], m_swapchain.GetAttachment(imageIdx).view,
-    m_basicForwardPipeline.pipeline);
-
-  ImDrawData* pDrawData = ImGui::GetDrawData();
-  auto currentGUICmdBuf = m_pGUIRender->BuildGUIRenderCommand(imageIdx, pDrawData);
-
-  std::vector<VkCommandBuffer> submitCmdBufs = { currentCmdBuf, currentGUICmdBuf};
-
-  VkSubmitInfo submitInfo = {};
-  submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-  submitInfo.waitSemaphoreCount = 1;
-  submitInfo.pWaitSemaphores = waitSemaphores;
-  submitInfo.pWaitDstStageMask = waitStages;
-  submitInfo.commandBufferCount = submitCmdBufs.size();
-  submitInfo.pCommandBuffers = submitCmdBufs.data();
-
-  VkSemaphore signalSemaphores[] = {m_presentationResources.renderingFinished};
-  submitInfo.signalSemaphoreCount = 1;
-  submitInfo.pSignalSemaphores = signalSemaphores;
-
-  VK_CHECK_RESULT(vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, m_frameFences[m_presentationResources.currentFrame]));
-
-  VkResult presentRes = m_swapchain.QueuePresent(m_presentationResources.queue, imageIdx,
-    m_presentationResources.renderingFinished);
 
   if (presentRes == VK_ERROR_OUT_OF_DATE_KHR || presentRes == VK_SUBOPTIMAL_KHR)
   {

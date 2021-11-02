@@ -1,0 +1,116 @@
+#version 430
+
+#define BLOCK_SIZE 256
+
+layout( local_size_x = BLOCK_SIZE ) in;
+
+layout( push_constant ) uniform params {
+  mat4 mProjView;
+  uint instanceAmount;
+} PushConstant;
+
+layout(std430, binding = 0) buffer Bbox
+{
+    mat2x4 bBoxes[];
+};
+
+layout(std430, binding = 1) buffer TsfmMat
+{
+    mat4x4 matrices[];
+};
+
+struct ModelInfo
+{
+    uint indexCount;
+    uint indexOffset;
+    uint vertexOffset;
+};
+
+layout(std430, binding = 2) buffer ModelInf
+{
+    ModelInfo modelInfos[];
+};
+
+layout(std430, binding = 3) buffer Indices
+{
+    uint instanceIndeces[];
+};
+
+struct IndirectCall
+{
+    uint indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    uint vertexOffset;
+    uint firstInstance;
+};
+
+layout(std430, binding = 4) buffer indirection_t
+{
+    IndirectCall indirCalls[];
+};
+
+vec4 frMin = vec4(-1, -1, 0, 1);
+vec4 frMax = vec4(1, 1, 1, 1);
+
+bool isInScreen(vec4 point)
+{
+    return point.x > -1 && point.x < 1 
+        && point.y > -1 && point.y < 1
+        && point.z < 1 && point.z > 0;
+}
+
+shared uint amt;
+void main() 
+{
+    uint idx = gl_GlobalInvocationID.x;
+    uint groupID = gl_WorkGroupID.x;
+    uint inGroupIDx = gl_LocalInvocationID.x;
+
+    barrier();
+    if(idx == 0)
+        amt = 0;
+    barrier();
+
+    uint amountToCheck = PushConstant.instanceAmount / BLOCK_SIZE;
+    uint blockStart = idx * amountToCheck;
+    for(uint i = 0; (i < amountToCheck) && ((i + blockStart) < PushConstant.instanceAmount ); i++)
+    {
+        mat4x2 trBbox = transpose(bBoxes[0]);
+        vec4 bBoxPts[8] = {
+            vec4(trBbox[0][0], trBbox[1][0], trBbox[2][0], 1),
+            vec4(trBbox[0][0], trBbox[1][0], trBbox[2][1], 1),
+            vec4(trBbox[0][1], trBbox[1][0], trBbox[2][1], 1),
+            vec4(trBbox[0][1], trBbox[1][0], trBbox[2][0], 1),
+            vec4(trBbox[0][0], trBbox[1][1], trBbox[2][0], 1),
+            vec4(trBbox[0][0], trBbox[1][1], trBbox[2][1], 1),
+            vec4(trBbox[0][1], trBbox[1][1], trBbox[2][1], 1),
+            vec4(trBbox[0][1], trBbox[1][1], trBbox[2][0], 1),
+        };
+
+        bool isSeen = false;
+        for (uint j = 0; j < 8; ++j)
+        {
+            vec4 screenspacePt = PushConstant.mProjView * matrices[i] * bBoxPts[j];
+            screenspacePt /= screenspacePt.w;
+
+            isSeen = isSeen || isInScreen(screenspacePt);
+        }
+        
+        if(isSeen)
+        {
+            uint temp = atomicAdd(amt, 1);
+            instanceIndeces[temp] = idx;
+        }
+    }
+
+    if (inGroupIDx == 0)
+    {
+          indirCalls[inGroupIDx].indexCount = modelInfos[inGroupIDx].indexCount;
+          indirCalls[inGroupIDx].indexCount = modelInfos[inGroupIDx].indexCount;
+          indirCalls[inGroupIDx].instanceCount = amt;
+          indirCalls[inGroupIDx].firstIndex = modelInfos[inGroupIDx].indexOffset;
+          indirCalls[inGroupIDx].vertexOffset = modelInfos[inGroupIDx].vertexOffset;
+          indirCalls[inGroupIDx].firstInstance = 0;
+    }
+}
