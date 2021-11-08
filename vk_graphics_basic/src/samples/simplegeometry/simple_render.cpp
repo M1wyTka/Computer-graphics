@@ -94,6 +94,7 @@ void SimpleRender::SetupDeviceFeatures()
   // m_enabledDeviceFeatures.fillModeNonSolid = VK_TRUE;
   m_enabledDeviceFeatures.multiDrawIndirect         = true;
   m_enabledDeviceFeatures.drawIndirectFirstInstance = true;
+  m_enabledDeviceFeatures.geometryShader            = VK_TRUE;
 }
 
 void SimpleRender::InitPresentation(VkSurfaceKHR &a_surface)
@@ -213,8 +214,8 @@ void SimpleRender::SetupSimplePipeline()
   m_pBindings->BindBuffer(4, m_indirectDraw);
   m_pBindings->BindEnd(&m_basicComputeDS, &m_basicComputeDSLayout);
 
-  m_pBindings->BindBegin(VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT);
-  m_pBindings->BindBuffer(0, m_ubo, VK_NULL_HANDLE, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+  m_pBindings->BindBegin(VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_GEOMETRY_BIT);
+  m_pBindings->BindBuffer(0, m_ubo, VK_NULL_HANDLE, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER); 
   m_pBindings->BindBuffer(1, m_instanceMatrices);
   m_pBindings->BindBuffer(2, m_visibleInd);
   m_pBindings->BindEnd(&m_dSet, &m_dSetLayout);
@@ -234,25 +235,37 @@ void SimpleRender::SetupSimplePipeline()
   }
 
   vk_utils::GraphicsPipelineMaker maker;
-
   std::unordered_map<VkShaderStageFlagBits, std::string> shader_paths;
+
   shader_paths[VK_SHADER_STAGE_FRAGMENT_BIT] = FRAGMENT_SHADER_PATH + ".spv";
   shader_paths[VK_SHADER_STAGE_VERTEX_BIT]   = VERTEX_SHADER_PATH + ".spv";
-
   maker.LoadShaders(m_device, shader_paths);
+  
   m_basicForwardPipeline.layout = maker.MakeLayout(m_device, { m_dSetLayout }, sizeof(pushConst2M));
 
   maker.SetDefaultState(m_width, m_height);
-
   m_basicForwardPipeline.pipeline = maker.MakePipeline(m_device, m_pScnMgr->GetPipelineVertexInputStateCreateInfo(),
-                                                       m_screenRenderPass, {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR});
+                                                        m_screenRenderPass, { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR });
+
+
+  shader_paths[VK_SHADER_STAGE_GEOMETRY_BIT] = GEOMETRY_SHADER_PATH + ".spv";
+  shader_paths[VK_SHADER_STAGE_FRAGMENT_BIT] = GEOMETRY_FRAGMENT_SHADER_PATH + ".spv";
+  shader_paths[VK_SHADER_STAGE_VERTEX_BIT]   = VERTEX_SHADER_PATH + ".spv";
+  maker.LoadShaders(m_device, shader_paths);
+  
+  m_extraGeometryPipeline.layout = maker.MakeLayout(m_device, { m_dSetLayout }, sizeof(pushConst2M));
+
+  maker.SetDefaultState(m_width, m_height);
+  m_extraGeometryPipeline.pipeline = maker.MakePipeline(m_device, m_pScnMgr->GetPipelineVertexInputStateCreateInfo(),
+                                                       m_screenRenderPass, { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR });
+
 }
 
 void SimpleRender::CreateComputePipeline() 
 {
   /////////////////////////////
   auto lambdaCreatePipeline = [this](std::string ShaderPath, size_t PushSize, VkDescriptorSetLayout &DSLayout, VkPipelineLayout &PipeLayout, VkPipeline &Pipeline) {
-    // Загружаем шейдер
+    // Loading shader
     std::vector<uint32_t> code          = vk_utils::readSPVFile(ShaderPath.c_str());
     VkShaderModuleCreateInfo createInfo = {};
     createInfo.sType                    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -273,7 +286,7 @@ void SimpleRender::CreateComputePipeline()
     pcRange.size                = PushSize;
     pcRange.stageFlags          = VK_SHADER_STAGE_COMPUTE_BIT;
 
-    // Создаём layout для pipeline
+    // Layout for pipeline
     VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo = {};
     pipelineLayoutCreateInfo.sType                      = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pipelineLayoutCreateInfo.setLayoutCount             = 1;
@@ -296,7 +309,7 @@ void SimpleRender::CreateComputePipeline()
 void SimpleRender::FillCullingBuffers() 
 {
   std::vector<LiteMath::Box4f> temp;
-  temp.push_back(m_pScnMgr->GetInstanceBbox(1));
+  temp.push_back(m_pScnMgr->GetInstanceBbox(meshId));
   m_pCopyHelper->UpdateBuffer(m_bBoxes, 0, temp.data(), sizeof(LiteMath::Box4f) * temp.size());
 
   std::vector<LiteMath::float4x4> temp2;
@@ -319,7 +332,7 @@ void SimpleRender::FillCullingBuffers()
     uint32_t indexOffset;
     uint32_t vertexOffset;
   };
-  auto mesh_info = m_pScnMgr->GetMeshInfo(1);
+  auto mesh_info = m_pScnMgr->GetMeshInfo(meshId);
   ModInf modinf{ mesh_info.m_indNum, mesh_info.m_indexOffset, mesh_info.m_vertexOffset };
   m_pCopyHelper->UpdateBuffer(m_modelInfos, 0, &modinf, sizeof(ModInf));
 }
@@ -399,11 +412,17 @@ void SimpleRender::BuildCommandBufferSimple(VkCommandBuffer a_cmdBuff, VkFramebu
     vkCmdBindVertexBuffers(a_cmdBuff, 0, 1, &vertexBuf, &zero_offset);
     vkCmdBindIndexBuffer(a_cmdBuff, indexBuf, 0, VK_INDEX_TYPE_UINT32);
 
-    int rabbitId = 1;
-    auto inst    = m_pScnMgr->GetInstanceInfo(rabbitId);
-
-    auto mesh_info = m_pScnMgr->GetMeshInfo(inst.mesh_id);
     vkCmdPushConstants(a_cmdBuff, m_basicForwardPipeline.layout, stageFlags, 0, sizeof(pushConst2M), &pushConst2M);
+    vkCmdDrawIndexedIndirect(a_cmdBuff, m_indirectDraw, 0, 1, 0);
+
+
+    // Bind to new pipeline
+    // Use different stages
+    vkCmdBindPipeline(a_cmdBuff, VK_PIPELINE_BIND_POINT_GRAPHICS, m_extraGeometryPipeline.pipeline);
+    vkCmdBindDescriptorSets(a_cmdBuff, VK_PIPELINE_BIND_POINT_GRAPHICS, m_extraGeometryPipeline.layout, 0, 1, &m_dSet, 0, VK_NULL_HANDLE);
+    stageFlags = (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_GEOMETRY_BIT);
+    
+    vkCmdPushConstants(a_cmdBuff, m_extraGeometryPipeline.layout, stageFlags, 0, sizeof(pushConst2M), &pushConst2M);
     vkCmdDrawIndexedIndirect(a_cmdBuff, m_indirectDraw, 0, 1, 0);
 
     vkCmdEndRenderPass(a_cmdBuff);
@@ -484,7 +503,16 @@ void SimpleRender::Cleanup()
     vkDestroySemaphore(m_device, m_presentationResources.renderingFinished, nullptr);
     m_presentationResources.renderingFinished = VK_NULL_HANDLE;
   }
-
+  if (m_extraGeometryPipeline.pipeline != VK_NULL_HANDLE)
+  {
+    vkDestroyPipeline(m_device, m_extraGeometryPipeline.pipeline, nullptr);
+    m_extraGeometryPipeline.pipeline = VK_NULL_HANDLE;
+  }
+  if (m_extraGeometryPipeline.layout != VK_NULL_HANDLE)
+  {
+    vkDestroyPipelineLayout(m_device, m_extraGeometryPipeline.layout, nullptr);
+    m_extraGeometryPipeline.layout = VK_NULL_HANDLE;
+  }
   //if (m_commandPool != VK_NULL_HANDLE)
   //{
   //  vkDestroyCommandPool(m_device, m_commandPool, nullptr);

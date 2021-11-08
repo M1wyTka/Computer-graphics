@@ -13,7 +13,7 @@ layout(push_constant) uniform params_t
     mat4 mProjView;
 } params;
 
-layout (location = 0 ) out VS_OUT
+layout (location = 0) out VS_OUT
 {
     vec3 wPos;
     vec3 wNorm;
