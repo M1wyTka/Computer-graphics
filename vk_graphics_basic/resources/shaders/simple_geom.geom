@@ -1,6 +1,6 @@
 #version 450
 layout (triangles) in;
-layout (line_strip, max_vertices = 2) out;
+layout (line_strip, max_vertices = 3) out;
 
 layout(push_constant) uniform params_t
 {
@@ -31,12 +31,31 @@ vec4 GetOffsetPoint()
     return GetMiddlePoint() + GetNorm() * offsetMagnitude;
 }
 
+// definetly not random
+float rand(vec2 co){
+    return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
+vec4 GetRandInSphere(vec4 middle, float radius)
+{
+    float n = rand(vec2(middle.x, middle.y))*radius;
+    return vec4(n, n, n, 0);
+}
+
+
 void main()
 {
-    gl_Position = params.mProjView * GetMiddlePoint();
+    vec4 start = GetMiddlePoint();
+    vec4 end = GetOffsetPoint();
+    vec4 mid =  (start + end) / 2;
+
+    gl_Position = params.mProjView * (start);
     EmitVertex();
 
-    gl_Position = params.mProjView * GetOffsetPoint();
+    gl_Position = params.mProjView * (mid + GetRandInSphere(mid, 0.015));
+    EmitVertex();
+
+    gl_Position = params.mProjView * (end + GetRandInSphere(end, 0.015));
     EmitVertex();
 
     EndPrimitive();
