@@ -53,10 +53,10 @@ layout(std430, binding = 4) buffer indirection_t
 vec4 frMin = vec4(-1, -1, 0, 1);
 vec4 frMax = vec4(1, 1, 1, 1);
 float a = 1.0;
+
 bool isInScreen(vec4 point)
 {
-    return point.x >= -a && point.x =< a
-        && point.y >= -a && point.y =< a;
+    return (point.x >= -a) && (point.x <= a) && (point.y >= -a) && (point.y <= a) && (point.z >= 0.0) && (point.z <= 1.0);
 }
 
 shared uint amt;
@@ -66,7 +66,6 @@ void main()
     uint groupID = gl_WorkGroupID.x;
     uint inGroupIDx = gl_LocalInvocationID.x;
 
-    barrier();
     if(idx == 0)
         amt = 0;
     barrier();
@@ -91,7 +90,7 @@ void main()
         for (uint j = 0; j < 8; j++)
         {
             vec4 screenspacePt = PushConstant.mProjView * matrices[blockStart+i] * bBoxPts[j];
-            screenspacePt /= screenspacePt.w;
+            screenspacePt /= abs(screenspacePt.w);
 
             isSeen = isSeen || isInScreen(screenspacePt);
         }
@@ -102,10 +101,9 @@ void main()
             instanceIndeces[temp] = blockStart+i;
         }
     }
-
+    barrier();
     if (inGroupIDx == 0)
     {
-          indirCalls[inGroupIDx].indexCount = modelInfos[inGroupIDx].indexCount;
           indirCalls[inGroupIDx].indexCount = modelInfos[inGroupIDx].indexCount;
           indirCalls[inGroupIDx].instanceCount = amt;
           indirCalls[inGroupIDx].firstIndex = modelInfos[inGroupIDx].indexOffset;

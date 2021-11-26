@@ -153,8 +153,8 @@ void SimpleRender::CreateUniformBuffer()
   allocateInfo.pNext                = nullptr;
   allocateInfo.allocationSize       = memReq.size;
   allocateInfo.memoryTypeIndex      = vk_utils::findMemoryType(memReq.memoryTypeBits,
-    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-    m_physicalDevice);
+                                                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                                               m_physicalDevice);
   VK_CHECK_RESULT(vkAllocateMemory(m_device, &allocateInfo, nullptr, &m_uboAlloc));
 
   VK_CHECK_RESULT(vkBindBufferMemory(m_device, m_ubo, m_uboAlloc, 0));
@@ -301,9 +301,10 @@ void SimpleRender::FillCullingBuffers()
 
   std::vector<LiteMath::float4x4> temp2;
   LiteMath::float3 corner = LiteMath::float3(0, 0, 0);
-  for (uint32_t i = 0; i < instanceAmount / 50; i++)
+  uint32_t sq             = sqrt(instanceAmount);
+  for (uint32_t i = 0; i < sq; i++)
   {
-    for (uint32_t j = 0; j < 50; j++)
+    for (uint32_t j = 0; j < sq; j++)
     {
       LiteMath::float3 offset = corner + LiteMath::float3(j, -2, i);
       LiteMath::float4x4 mat  = LiteMath::translate4x4(offset) * LiteMath::scale4x4(vec3(1, 1, 1));
@@ -622,8 +623,11 @@ void SimpleRender::ProcessInput(const AppInput &input)
     std::system("cd ../resources/shaders && python3 compile_simple_render_shaders.py");
 #endif
 
+    CreateUniformBuffer();
+    CreateCullingBuffers();
     SetupSimplePipeline();
     CreateComputePipeline();
+    FillCullingBuffers();
 
     for (size_t i = 0; i < m_framesInFlight; ++i)
     {

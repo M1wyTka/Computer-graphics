@@ -19,8 +19,7 @@ class SimpleRender : public IRender
 {
 public:
 
-  static constexpr uint32_t instanceAmount = 1000;
-  static constexpr uint32_t groupSize      = 128;
+  static constexpr uint32_t instanceAmount = 1024;
 
   const std::string VERTEX_SHADER_PATH   = "../resources/shaders/simple.vert";
   const std::string FRAGMENT_SHADER_PATH = "../resources/shaders/simple.frag";
